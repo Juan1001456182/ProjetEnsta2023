@@ -11,6 +11,9 @@ Numeric::solve_RK4_fixed_vortices( double dt, CartesianGridOfSpeed const& t_velo
     using point  = Simulation::Vortices::point;
 
     Geometry::CloudOfPoints newCloud(t_points.numberOfPoints());
+
+
+    #pragma omp parallel for num_threads(8)
     // On ne bouge que les points :
     for ( std::size_t iPoint=0; iPoint<t_points.numberOfPoints(); ++iPoint)
     {
@@ -40,6 +43,8 @@ Numeric::solve_RK4_movable_vortices( double dt, CartesianGridOfSpeed& t_velocity
     using point  = Simulation::Vortices::point;
 
     Geometry::CloudOfPoints newCloud(t_points.numberOfPoints());
+
+    #pragma omp parallel for num_threads(8)
     // On ne bouge que les points :
     for ( std::size_t iPoint=0; iPoint<t_points.numberOfPoints(); ++iPoint)
     {
@@ -58,6 +63,8 @@ Numeric::solve_RK4_movable_vortices( double dt, CartesianGridOfSpeed& t_velocity
     }
     std::vector<point> newVortexCenter;
     newVortexCenter.reserve(t_vortices.numberOfVortices());
+
+    
     for (std::size_t iVortex=0; iVortex<t_vortices.numberOfVortices(); ++iVortex)
     {
         point p = t_vortices.getCenter(iVortex);
@@ -73,6 +80,8 @@ Numeric::solve_RK4_movable_vortices( double dt, CartesianGridOfSpeed& t_velocity
         vector v4 = t_vortices.computeSpeed(p3);
         newVortexCenter.emplace_back(t_velocity.updatePosition(p + onesixth*dt*(v1+2.*v2+2.*v3+v4)));
     }
+
+    #pragma omp parallel for num_threads(8)
     for (std::size_t iVortex=0; iVortex<t_vortices.numberOfVortices(); ++iVortex)
     {
         t_vortices.setVortex(iVortex, newVortexCenter[iVortex], 
