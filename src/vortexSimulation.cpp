@@ -1,5 +1,7 @@
 #include <SFML/Window/Keyboard.hpp>
 #include <ios>
+#include <mpi.h>
+#include <omp.h>
 #include <iostream>
 #include <cstdlib>
 #include <fstream>
@@ -86,9 +88,20 @@ auto readConfigFile( std::ifstream& input )
     return std::make_tuple(vortices, isMobile, cartesianGrid, cloudOfPoints);
 }
 
-
 int main( int nargs, char* argv[] )
-{
+{   
+
+    //Begin MPI process
+    int num_procs;
+    int rank;
+
+    MPI_Init(&nargs, &argv);
+    MPI_Comm_size(MPI_COMM_WORLD, &num_procs);
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    printf("%d: hello (p=%d)\n", rank, num_procs);
+    MPI_Status status;
+
+    
     char const* filename;
     if (nargs==1)
     {
@@ -113,66 +126,151 @@ int main( int nargs, char* argv[] )
     auto grid     = std::get<2>(config);
     auto cloud    = std::get<3>(config);
 
-    std::cout << "######## Vortex simultor ########" << std::endl << std::endl;
-    std::cout << "Press P for play animation " << std::endl;
-    std::cout << "Press S to stop animation" << std::endl;
-    std::cout << "Press right cursor to advance step by step in time" << std::endl;
-    std::cout << "Press down cursor to halve the time step" << std::endl;
-    std::cout << "Press up cursor to double the time step" << std::endl;
 
-    grid.updateVelocityField(vortices);
-
-    Graphisme::Screen myScreen( {resx,resy}, {grid.getLeftBottomVertex(), grid.getRightTopVertex()} );
-    bool animate=false;
     double dt = 0.1;
 
-    
-    while (myScreen.isOpen())
-    {
-        auto start = std::chrono::system_clock::now();
-        bool advance = false;
-        // on inspecte tous les évènements de la fenêtre qui ont été émis depuis la précédente itération
-        sf::Event event;
-        while (myScreen.pollEvent(event))
+    //Orders to be exchange between the processes (Continuous animation, Step animation, dt)
+    //orders[0] -> Continuous animation{0:false - 1:true}
+    //orders[1] -> Step animation{0:false - 1:true}
+    //orders[2] -> dt
+    double orders[3];
+    grid.updateVelocityField(vortices);
+
+    //The rank 0 will be in charge of the display
+    if (rank==0){
+        std::cout << "######## Vortex simulation ########" << std::endl << std::endl;
+        std::cout << "Press P for play animation " << std::endl;
+        std::cout << "Press S to stop animation" << std::endl;
+        std::cout << "Press right cursor to advance step by step in time" << std::endl;
+        std::cout << "Press down cursor to halve the time step" << std::endl;
+        std::cout << "Press up cursor to double the time step" << std::endl;
+
+        Graphisme::Screen myScreen( {resx,resy}, {grid.getLeftBottomVertex(), grid.getRightTopVertex()} );
+
+        while (myScreen.isOpen())
         {
-            // évènement "fermeture demandée" : on ferme la fenêtre
-            if (event.type == sf::Event::Closed)
-                myScreen.close();
-            if (event.type == sf::Event::Resized)
+            
+            auto start = std::chrono::system_clock::now();
+            // on inspecte tous les évènements de la fenêtre qui ont été émis depuis la précédente itération
+            sf::Event event;
+
+           
+            while (myScreen.pollEvent(event))
             {
-                // on met à jour la vue, avec la nouvelle taille de la fenêtre
-                myScreen.resize(event);
+                
+                // évènement "fermeture demandée" : on ferme la fenêtre
+                if (event.type == sf::Event::Closed)
+                {
+                    myScreen.close();
+
+                    //For stoping MPI when we close the window
+                    MPI_Abort(MPI_COMM_WORLD, 0);
+                    MPI_Finalize();
+                }
+                if (event.type == sf::Event::Resized)
+                {
+                    // on met à jour la vue, avec la nouvelle taille de la fenêtre
+                    myScreen.resize(event);
+                }
+
+                //When we press P: 
+                if (sf::Keyboard::isKeyPressed(sf::Keyboard::P))
+                {    
+                    
+                    //Update of the orders when pressed P
+                    orders[0] = 1;
+                    orders[1] = 0;
+                    orders[2] = dt;
+                }
+
+                //When press S
+                if (sf::Keyboard::isKeyPressed(sf::Keyboard::S))
+                {
+                    
+                    //Update of the orders when pressed S
+                    orders[0] = 0;
+                    orders[1] = 0;
+                    orders[2] = dt;
+                }
+                if (sf::Keyboard::isKeyPressed(sf::Keyboard::Up)) dt *= 2;
+                if (sf::Keyboard::isKeyPressed(sf::Keyboard::Down)) dt /= 2;
+                
+                //When press Right arrow
+                if (sf::Keyboard::isKeyPressed(sf::Keyboard::Right))
+                {   
+                    //Update of the orders when pressed Right arrow
+                    orders[0] = 0;
+                    orders[1] = 1;
+                    orders[2] = dt;
+                }
+
+
             }
-            if (sf::Keyboard::isKeyPressed(sf::Keyboard::P)) animate = true;
-            if (sf::Keyboard::isKeyPressed(sf::Keyboard::S)) animate = false;
-            if (sf::Keyboard::isKeyPressed(sf::Keyboard::Up)) dt *= 2;
-            if (sf::Keyboard::isKeyPressed(sf::Keyboard::Down)) dt /= 2;
-            if (sf::Keyboard::isKeyPressed(sf::Keyboard::Right)) advance = true;
+
+            //Whenever either Continuous or step animation are true:1
+            if((orders[0] == 1 )| (orders[1] == 1)){
+                
+                //Sends the array with the orders
+                MPI_Send(&orders, 3, MPI_DOUBLE, 1, 101, MPI_COMM_WORLD);
+
+                //Wait for the values of cloud, vortices, grid and the updated orders from rank 1
+                MPI_Recv(cloud.data(), cloud.numberOfPoints()*2, MPI_DOUBLE, 1, 102, MPI_COMM_WORLD, &status);
+                MPI_Recv(vortices.data(), vortices.numberOfVortices()*3, MPI_DOUBLE, 1, 103, MPI_COMM_WORLD, &status);
+                MPI_Recv(grid.data(), grid.cellGeometry().first* grid.cellGeometry().second*2, MPI_DOUBLE, 1, 104, MPI_COMM_WORLD, &status);
+                MPI_Recv(&orders, 3, MPI_DOUBLE, 1, 105, MPI_COMM_WORLD, &status);
+            }
+
+            myScreen.clear(sf::Color::Black);
+            std::string strDt = std::string("Time step : ") + std::to_string(dt);
+            myScreen.drawText(strDt, Geometry::Point<double>{50, double(myScreen.getGeometry().second-96)});
+            myScreen.displayVelocityField(grid, vortices);
+            myScreen.displayParticles(grid, vortices, cloud);
+            auto end = std::chrono::system_clock::now();
+            std::chrono::duration<double> diff = end - start;
+            std::string str_fps = std::string("FPS : ") + std::to_string(1./diff.count());
+            myScreen.drawText(str_fps, Geometry::Point<double>{300, double(myScreen.getGeometry().second-96)});
+            myScreen.display();
+
+             
         }
-        if (animate | advance)
-        {
-            if (isMobile)
-            {
-                cloud = Numeric::solve_RK4_movable_vortices(dt, grid, vortices, cloud);
-            }
-            else
-            {
-                cloud = Numeric::solve_RK4_fixed_vortices(dt, grid, cloud);
-            }
-        }
-        myScreen.clear(sf::Color::Black);
-        std::string strDt = std::string("Time step : ") + std::to_string(dt);
-        myScreen.drawText(strDt, Geometry::Point<double>{50, double(myScreen.getGeometry().second-96)});
-        myScreen.displayVelocityField(grid, vortices);
-        myScreen.displayParticles(grid, vortices, cloud);
-        auto end = std::chrono::system_clock::now();
-        std::chrono::duration<double> diff = end - start;
-        std::string str_fps = std::string("FPS : ") + std::to_string(1./diff.count());
-        myScreen.drawText(str_fps, Geometry::Point<double>{300, double(myScreen.getGeometry().second-96)});
-        myScreen.display();
-        
-        
+
     }
+
+    //The rank 1 will be in charge of the calculation
+    if (rank==1){
+        while(true){
+
+            //It takes the orders from rank 0
+            MPI_Recv(&orders, 3, MPI_DOUBLE, 0, 101, MPI_COMM_WORLD, &status);
+            
+            ////Whenever either Continuous or step animation are true:1
+            if ((orders[0] == 1) | (orders[1] == 1))
+            {
+                if (isMobile)
+                {
+                    cloud = Numeric::solve_RK4_movable_vortices(orders[2], grid, vortices, cloud);
+                
+                }
+                else
+                {
+                    cloud = Numeric::solve_RK4_fixed_vortices(orders[2], grid, cloud);
+                }
+
+                //Update orders when for the step animation information
+                orders[1] = 0;
+
+                //Sends the cloud, vortices, grid and update orders
+                MPI_Send(cloud.data(), cloud.numberOfPoints()*2, MPI_DOUBLE, 0, 102, MPI_COMM_WORLD);
+                MPI_Send(vortices.data(), vortices.numberOfVortices()*3, MPI_DOUBLE, 0, 103, MPI_COMM_WORLD);
+                MPI_Send(grid.data(), grid.cellGeometry().first * grid.cellGeometry().second * 2, MPI_DOUBLE, 0, 104, MPI_COMM_WORLD);
+                MPI_Send(&orders, 3, MPI_DOUBLE, 0, 105, MPI_COMM_WORLD);
+                
+            }
+
+        }
+    }
+
+    MPI_Finalize();
 
     return EXIT_SUCCESS;
  }
